@@ -1,0 +1,16 @@
+# Build output
+target/
+
+# Maven wrapper cache
+.mvn/wrapper/maven-wrapper.jar
+
+src/test/resources/privateKey.pem
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Environment
+.env
+*.env

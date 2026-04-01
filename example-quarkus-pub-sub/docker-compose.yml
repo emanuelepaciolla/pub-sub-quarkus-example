@@ -1,0 +1,113 @@
+services:
+
+  postgres:
+    image: postgres:14-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: gcpdemo
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  pubsub-emulator:
+    image: gcr.io/google.com/cloudsdktool/cloud-sdk:emulators
+    command: >
+      gcloud beta emulators pubsub start
+      --project=local-project
+      --host-port=0.0.0.0:8085
+    ports:
+      - "8085:8085"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:8085 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  pubsub-init:
+    image: curlimages/curl:latest
+    depends_on:
+      pubsub-emulator:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        BASE="http://pubsub-emulator:8085/v1/projects/local-project"
+        DLQ_TOPIC="projects/local-project/topics/messages-dlq"
+
+        echo "=== Creazione topics ==="
+        for topic in demo-topic user-events system-events notification-events messages-dlq; do
+          curl -sf -X PUT "$${BASE}/topics/$${topic}" \
+            && echo "  OK topic: $${topic}" \
+            || echo "  WARN: $${topic} gia' esistente"
+        done
+
+        echo "=== Creazione DLQ subscription (nessuna dead letter policy) ==="
+        curl -sf -X PUT "$${BASE}/subscriptions/messages-dlq-sub" \
+          -H "Content-Type: application/json" \
+          -d "{\"topic\":\"$${DLQ_TOPIC}\"}" \
+          && echo "  OK sub: messages-dlq-sub"
+
+        echo "=== Creazione subscriptions con deadLetterPolicy → messages-dlq ==="
+        # Le subscription principali sono configurate con maxDeliveryAttempts=5.
+        # Dopo 5 nack (o scadenze ack), Pub/Sub sposta automaticamente il messaggio
+        # sul topic messages-dlq, che viene consumato da DlqSubscriberManager.
+
+        curl -sf -X PUT "$${BASE}/subscriptions/demo-subscription" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"topic\": \"projects/local-project/topics/demo-topic\",
+            \"deadLetterPolicy\": {
+              \"deadLetterTopic\": \"$${DLQ_TOPIC}\",
+              \"maxDeliveryAttempts\": 5
+            }
+          }" && echo "  OK sub: demo-subscription"
+
+        curl -sf -X PUT "$${BASE}/subscriptions/user-events-sub" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"topic\": \"projects/local-project/topics/user-events\",
+            \"deadLetterPolicy\": {
+              \"deadLetterTopic\": \"$${DLQ_TOPIC}\",
+              \"maxDeliveryAttempts\": 5
+            }
+          }" && echo "  OK sub: user-events-sub"
+
+        curl -sf -X PUT "$${BASE}/subscriptions/system-events-sub" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"topic\": \"projects/local-project/topics/system-events\",
+            \"deadLetterPolicy\": {
+              \"deadLetterTopic\": \"$${DLQ_TOPIC}\",
+              \"maxDeliveryAttempts\": 5
+            }
+          }" && echo "  OK sub: system-events-sub"
+
+        curl -sf -X PUT "$${BASE}/subscriptions/notification-events-sub" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"topic\": \"projects/local-project/topics/notification-events\",
+            \"deadLetterPolicy\": {
+              \"deadLetterTopic\": \"$${DLQ_TOPIC}\",
+              \"maxDeliveryAttempts\": 5
+            }
+          }" && echo "  OK sub: notification-events-sub"
+
+        echo "=== Pub/Sub init completato ==="
+
+  adminer:
+    image: adminer:4.8.1
+    ports:
+      - "8081:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

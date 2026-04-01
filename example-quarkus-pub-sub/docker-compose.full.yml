@@ -1,0 +1,154 @@
+# =============================================================================
+# Stack completo: Postgres + Pub/Sub emulator + App Quarkus + Adminer
+# =============================================================================
+#
+# Avvio:
+#   docker-compose -f docker-compose.full.yml up --build
+#
+# La prima volta --build compila l'app (scarica dipendenze Maven ~5 min).
+# Le build successive sono molto più veloci grazie alla cache Docker.
+#
+# Servizi esposti:
+#   http://localhost:8080        → API REST (richiede JWT Bearer token)
+#   http://localhost:8080/q/health   → health check (pubblico)
+#   http://localhost:8080/swagger-ui.html → Swagger UI
+#   http://localhost:8081        → Adminer (UI per il database)
+#   localhost:5432               → PostgreSQL
+#   localhost:8085               → Pub/Sub emulator (REST + gRPC)
+#
+# Per ottenere un token JWT di test:
+#   ./get-token.sh ADMIN      → token con ruolo ADMIN
+#   ./get-token.sh PUBLISHER  → token con ruolo PUBLISHER
+#   ./get-token.sh READER     → token con ruolo READER
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 14
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:14-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: gcpdemo
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # GCP Pub/Sub emulator
+  # ---------------------------------------------------------------------------
+  pubsub-emulator:
+    image: gcr.io/google.com/cloudsdktool/cloud-sdk:emulators
+    command: >
+      gcloud beta emulators pubsub start
+      --project=local-project
+      --host-port=0.0.0.0:8085
+    ports:
+      - "8085:8085"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8085 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # ---------------------------------------------------------------------------
+  # Init: crea topics e subscriptions con dead letter policy
+  # Esegue una volta sola e poi si ferma (condition: service_completed_successfully)
+  # ---------------------------------------------------------------------------
+  pubsub-init:
+    image: curlimages/curl:latest
+    depends_on:
+      pubsub-emulator:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        BASE="http://pubsub-emulator:8085/v1/projects/local-project"
+        DLQ_TOPIC="projects/local-project/topics/messages-dlq"
+
+        echo "=== Creazione topics ==="
+        for topic in demo-topic user-events system-events notification-events messages-dlq; do
+          curl -sf -X PUT "$${BASE}/topics/$${topic}" \
+            && echo "  OK topic: $${topic}" \
+            || echo "  WARN: $${topic} gia' esistente"
+        done
+
+        echo "=== Creazione DLQ subscription ==="
+        curl -sf -X PUT "$${BASE}/subscriptions/messages-dlq-sub" \
+          -H "Content-Type: application/json" \
+          -d "{\"topic\":\"$${DLQ_TOPIC}\"}" \
+          && echo "  OK sub: messages-dlq-sub"
+
+        echo "=== Creazione subscriptions con deadLetterPolicy ==="
+        for sub_topic in "demo-subscription:demo-topic" \
+                         "user-events-sub:user-events" \
+                         "system-events-sub:system-events" \
+                         "notification-events-sub:notification-events"; do
+          sub=$${sub_topic%%:*}
+          topic=$${sub_topic##*:}
+          curl -sf -X PUT "$${BASE}/subscriptions/$${sub}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"topic\": \"projects/local-project/topics/$${topic}\",
+              \"deadLetterPolicy\": {
+                \"deadLetterTopic\": \"$${DLQ_TOPIC}\",
+                \"maxDeliveryAttempts\": 5
+              }
+            }" && echo "  OK sub: $${sub}"
+        done
+
+        echo "=== Pub/Sub init completato ==="
+
+  # ---------------------------------------------------------------------------
+  # Applicazione Quarkus
+  # Attende Postgres (healthy) e la fine dell'init Pub/Sub (completed)
+  # ---------------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      # Database
+      DB_URL: jdbc:postgresql://postgres:5432/gcpdemo
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      # Pub/Sub emulator (stringa vuota = usa GCP reale con ADC)
+      PUBSUB_EMULATOR_HOST: pubsub-emulator:8085
+      GCP_PROJECT_ID: local-project
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pubsub-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/q/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Adminer — UI web per interrogare PostgreSQL
+  # http://localhost:8081  (sistema: PostgreSQL, server: postgres, user: postgres)
+  # ---------------------------------------------------------------------------
+  adminer:
+    image: adminer:4.8.1
+    ports:
+      - "8081:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

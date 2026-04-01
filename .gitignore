@@ -1,0 +1,29 @@
+# Spring project — escluso
+example-spring-pub-sub/
+
+# Quarkus build
+example-quarkus-pub-sub/target/
+
+# Maven wrapper cache
+example-quarkus-pub-sub/.mvn/wrapper/maven-wrapper.jar
+
+# Chiavi e file sensibili
+example-quarkus-pub-sub/dev-private-key.pem
+example-quarkus-pub-sub/src/test/resources/privateKey.pem
+*.pem
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Environment
+.env
+*.env
+
+.claude/
+CLAUDE.md
+example-quarkus-pub-sub/LEARNING.md
+
+# Output
+out/
